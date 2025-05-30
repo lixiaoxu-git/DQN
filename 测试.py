@@ -357,7 +357,7 @@ class FCNN:
                 input = input.reshape(-1, 1)
             elif input.ndim == 2 and input.shape[0] == 1:
                 input = input.T  # 转置行向量为列向量
-            self.input = Tensor(input, requires_grad=True)
+            self.input = Tensor(input, requires_grad=False)
         else:
             self.input = input
 
@@ -370,9 +370,10 @@ class FCNN:
         return self.layers[-1]
 
     def clear_gradients(self):
-        for layer in self.layers + self.weights + self.biases:
-            if hasattr(layer, 'grad'):
-                layer.grad = None
+        # 只遍历需要更新的权重和偏置
+        for param in self.weights + self.biases:
+            if param.requires_grad:  # 仅清空需要梯度的参数
+                param.grad = None
 
 
 
@@ -442,7 +443,7 @@ class ReplayBuffer:
         return len(self.buffer)
 # DQN训练类（基于FCNN和Tensor）
 class DQNTrainer:
-    def __init__(self, state_size, action_size, hidden_layers=(32,), learning_rate=0.005, gamma=0.95,  epsilon=0.8, epsilon_decay=0.9, epsilon_min=0.01):
+    def __init__(self, state_size, action_size,maze_array ,hidden_layers=(32,), learning_rate=0.005, gamma=0.95,  epsilon=1, epsilon_decay=0.9, epsilon_min=0.01):
         self.state_size = state_size
         self.action_size = action_size
         self.gamma = gamma
@@ -450,6 +451,7 @@ class DQNTrainer:
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
         self.learning_rate = learning_rate
+        self.maze_array = maze_array
 
         # 主网络和目标网络
         self.policy_net = FCNN(
@@ -464,14 +466,15 @@ class DQNTrainer:
         )
         self._sync_target_network()
 
-        self.memory = ReplayBuffer(1000)  # 经验回放缓冲区
+        self.memory = ReplayBuffer(5000)  # 经验回放缓冲区
     def choose_action(self, state, training=True):
             self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)  # 衰减epsilon
             if random.random() < self.epsilon and training:
                 return random.randint(0, self.action_size-1)
             else:
                 # 确保state是4维向量（shape: (4,)）
-                state_reshaped = state.reshape(-1,1)  
+                state_normalized = state / (np.array([1,1,1,1])* self.maze_array.shape[0]) # 归一化到[0,1]
+                state_reshaped = state_normalized.reshape(-1, 1) 
                 self.policy_net.forward(state_reshaped)
                 q_values = self.policy_net.layers[-1].data.flatten()
                 return np.argmax(q_values)
@@ -527,26 +530,26 @@ class DQNTrainer:
             # 反向传播 (累积梯度)
             loss_sum.auto_backward()
         
-        # 统一更新参数 (除以batch_size实现平均梯度)
+            # 统一更新参数 (除以batch_size实现平均梯度)
         for w in self.policy_net.weights:
             if w.grad is not None:
-                # 计算梯度范数
+                    # 计算梯度范数
                 grad_norm = np.linalg.norm(w.grad)
                 if grad_norm > 1.0:  # 设置阈值
                     w.grad = w.grad / grad_norm  # 归一化梯度
-                w.data -= (self.learning_rate / batch_size) * w.grad
+                    w.data -= (self.learning_rate ) * w.grad
         for b in self.policy_net.biases:
             if b.grad is not None:
-                b.data -= (self.learning_rate / batch_size) * b.grad
-        
-        # 清空梯度
+                b.data -= (self.learning_rate ) * b.grad
+            
+            # 清空梯度
         self.policy_net.clear_gradients()
 # 训练流程
 def train_dqn(maze, start_pos, target_pos, episodes=2000, batch_size=32):
     maze_array = np.array(maze)
     state_size = 4
     action_size = 4  # 4种动作
-    trainer = DQNTrainer(state_size, action_size, hidden_layers=(32,))
+    trainer = DQNTrainer(state_size, action_size, maze_array,hidden_layers=(32,))
     agent = Agent(start_pos)
     rewards_history = []
     
@@ -556,7 +559,7 @@ def train_dqn(maze, start_pos, target_pos, episodes=2000, batch_size=32):
         state = np.array([agent.x,agent.y,target_pos[0],target_pos[1]])
         total_reward = 0
         done = False
-        while not done and len(trainer.memory.buffer) < trainer.memory.capacity:
+        while not done :
             action = trainer.choose_action(state)
             reward = 0
             
@@ -564,16 +567,15 @@ def train_dqn(maze, start_pos, target_pos, episodes=2000, batch_size=32):
             next_state = np.array([x,y,target_pos[0],target_pos[1]])
 
             if maze_array[y, x] == 1:  # 到达目标
-                reward+= 100
+                reward = 100
                 done = True
-            if maze_array[y, x] == -1:
-                reward-=10
+            elif maze_array[y, x] == -1:
+                reward=-5
             else:
-                reward-=1
+                reward=-0.1
             trainer.remember(state, action, reward, next_state, done)
             total_reward += reward
             state = next_state
-            agent.x ,agent.y = x, y
                 # 定期训练和同步目标网络
         if len(trainer.memory.buffer) >= batch_size:
             trainer.train_step(batch_size)
@@ -588,7 +590,6 @@ def train_dqn(maze, start_pos, target_pos, episodes=2000, batch_size=32):
 
 # 测试流程
 def test_dqn(trainer, maze, start_pos, target_pos,):
-    trainer.epsilon = 0
     maze_array = np.array(maze)
     agent = Agent(start_pos)
     state = np.array([agent.x,agent.y,target_pos[0],target_pos[1]])
